@@ -1,0 +1,99 @@
+tee sandbox/defender/defender_ai.py > /dev/null <<'PY'
+#!/usr/bin/env python3
+"""
+Rule-based IDS with blocked-IP support.
+Reads /shared/blocked_ips.json and suppresses alerts from blocked IPs.
+Exposes /alerts API for the dashboard.
+"""
+import time, json, os
+from collections import defaultdict
+from flask import Flask, jsonify
+
+TRAFFIC = "/shared/traffic.log"
+ALERTS = "/shared/alerts.json"
+BLOCKED = "/shared/blocked_ips.json"
+THRESHOLD_AUTH_FAILS = 5   # threshold within window
+WINDOW_SECONDS = 60
+
+app = Flask(__name__)
+state = {"alerts": []}
+
+def load_recent_events():
+    events = []
+    if not os.path.exists(TRAFFIC):
+        return events
+    with open(TRAFFIC, "r") as f:
+        for line in f:
+            try:
+                events.append(json.loads(line.strip()))
+            except Exception:
+                continue
+    return events
+
+def load_blocked():
+    if not os.path.exists(BLOCKED):
+        return set()
+    try:
+        data = json.loads(open(BLOCKED).read())
+        return set(data if isinstance(data, list) else [])
+    except Exception:
+        return set()
+
+def detect_alerts():
+    now = int(time.time())
+    events = load_recent_events()
+    blocked = load_blocked()
+    by_src = defaultdict(list)
+    for e in events:
+        ts = e.get("ts", now)
+        src = e.get("src_ip", "unknown")
+        if src in blocked:
+            # skip events from blocked IPs
+            continue
+        if now - ts <= WINDOW_SECONDS:
+            by_src[src].append(e)
+
+    alerts = []
+    for src, evs in by_src.items():
+        fails = sum(1 for e in evs if e.get("type") == "auth_fail")
+        scans = sum(1 for e in evs if e.get("type") == "scan")
+        if fails >= THRESHOLD_AUTH_FAILS:
+            alerts.append({
+                "ts": now,
+                "src": src,
+                "type": "brute_force",
+                "detail": f"{fails} failed auths in last {WINDOW_SECONDS}s"
+            })
+        elif scans >= 10:
+            alerts.append({
+                "ts": now,
+                "src": src,
+                "type": "port_scan",
+                "detail": f"{scans} scans in last {WINDOW_SECONDS}s"
+            })
+    return alerts
+
+def persist_alerts(alerts):
+    state["alerts"] = alerts
+    os.makedirs(os.path.dirname(ALERTS), exist_ok=True)
+    with open(ALERTS, "w") as f:
+        json.dump(alerts, f)
+
+@app.route("/alerts")
+def get_alerts():
+    return jsonify(state.get("alerts", []))
+
+def main_loop():
+    while True:
+        alerts = detect_alerts()
+        persist_alerts(alerts)
+        time.sleep(2)
+
+if __name__ == "__main__":
+    from threading import Thread
+    t = Thread(target=main_loop, daemon=True)
+    t.start()
+    app.run(host="0.0.0.0", port=8080)
+PY
+
+chmod +x sandbox/defender/defender_ai.py

@@ -1,0 +1,24 @@
+version: "3.9"
+services:
+  defender:
+    build: ./sandbox/defender
+    container_name: hackshield_defender
+    volumes:
+      - ./sandbox/shared:/shared
+    networks:
+      - hackshield_net
+    ports:
+      - "8080:8080"   # expose small API for UI/demos
+
+  attacker:
+    build: ./sandbox/attacker
+    container_name: hackshield_attacker
+    volumes:
+      - ./sandbox/shared:/shared
+    networks:
+      - hackshield_net
+
+networks:
+  hackshield_net:
+    driver: bridge
+
